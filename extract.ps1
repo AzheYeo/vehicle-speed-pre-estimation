@@ -4,10 +4,10 @@ param(
     [string]$VideoPath,
 
     [Parameter(Mandatory=$false)]
-    [float]$StartTime = -1,
+    [double]$StartTime = -1,
 
     [Parameter(Mandatory=$false)]
-    [float]$Duration = 4,
+    [double]$Duration = 3,
 
     [Parameter(Mandatory=$false)]
     [switch]$SkipMetadata,
@@ -45,10 +45,24 @@ Write-Host "Output directory: $outDir" -ForegroundColor Cyan
 $endTime = $StartTime + $Duration
 $frameOutDir = if ($FramesDir) { $FramesDir } else { Join-Path $outDir "frames_${StartTime}s-${endTime}s" }
 $frameHashCsv = $null
+$gopIdx = 0
+$gopMinFrameCount = $null
+$gopMaxFrameCount = $null
+$gopAvgFrameCount = $null
+$gopMinKeyInterval = $null
+$gopMaxKeyInterval = $null
+$gopAvgKeyInterval = $null
+$gopPictTypeSummary = $null
+$gopPatternSamples = @()
 $totalSteps = 2
 $currentStep = 0
-if (-not $SkipMetadata) { $totalSteps += 3 }
+if (-not $SkipMetadata) { $totalSteps += 5 }
 if ($StartTime -ge 0) { $totalSteps += 1 }
+$frameExportFirstPtsTime = $null
+$frameExportStartFrameIdx = -1
+$frameExportEndFrameIdx = -1
+$frameExportActualStartRel = $null
+$frameExportActualEndRel = $null
 
 # ---- 1. MD5 ----
 $currentStep++
@@ -71,29 +85,135 @@ if ($SkipMetadata) {
     # ---- 3. Frame data CSV ----
     $currentStep++
     Write-Host "[$currentStep/$totalSteps] Exporting frame data..." -ForegroundColor Yellow
-    $frameCsv = Join-Path $outDir "$videoName`_frames_$ts.csv"
+    $frameCsv = Join-Path $outDir "frames_$ts.csv"
 
     $frameHeader = 'frame_index,key_frame,pts_time,duration_time,pkt_pos,pkt_size,pict_type,interlaced_frame'
     $sw = [System.IO.StreamWriter]::new($frameCsv, $false, [System.Text.UTF8Encoding]::new($true))
     $sw.WriteLine($frameHeader)
 
     $frameIdx = 0
-    & ffprobe -v quiet -select_streams v:0 -show_frames `
+    $framesJsonRaw = & ffprobe -v quiet -select_streams v:0 -show_frames `
         -show_entries frame=pts_time,pict_type,key_frame,pkt_size,pkt_pos,duration_time,interlaced_frame `
-        -of csv=print_section=0 $VideoPath 2>&1 | ForEach-Object {
-        $line = $_.Trim()
-        if ($line) {
-            $sw.WriteLine("$frameIdx,$line")
-            $frameIdx++
-        }
+        -print_format json $VideoPath 2>&1
+    $framesMeta = $framesJsonRaw | ConvertFrom-Json
+    foreach ($fr in $framesMeta.frames) {
+        $keyFrame = if ($null -ne $fr.key_frame) { $fr.key_frame } else { '' }
+        $ptsTime = if ($null -ne $fr.pts_time) { $fr.pts_time } else { '' }
+        $frameDuration = if ($null -ne $fr.duration_time) { $fr.duration_time } else { '' }
+        $pktPos = if ($null -ne $fr.pkt_pos) { $fr.pkt_pos } else { '' }
+        $pktSize = if ($null -ne $fr.pkt_size) { $fr.pkt_size } else { '' }
+        $pictType = if ($null -ne $fr.pict_type) { $fr.pict_type } else { '' }
+        $interlaced = if ($null -ne $fr.interlaced_frame) { $fr.interlaced_frame } else { '' }
+        $sw.WriteLine("$frameIdx,$keyFrame,$ptsTime,$frameDuration,$pktPos,$pktSize,$pictType,$interlaced")
+        $frameIdx++
     }
     $sw.Dispose()
     Write-Host "  Exported $frameIdx frames" -ForegroundColor Green
 
-    # ---- 4. Packet data CSV ----
+    # ---- 4. GOP structure ----
+    $currentStep++
+    Write-Host "[$currentStep/$totalSteps] Analyzing GOP structure..." -ForegroundColor Yellow
+
+    $frameRowsForGop = @(Import-Csv -LiteralPath $frameCsv)
+    $gopRows = [System.Collections.ArrayList]::new()
+    $currentGop = $null
+
+    foreach ($fr in $frameRowsForGop) {
+        $fi = [int]$fr.frame_index
+        $isKey = ([string]$fr.key_frame -eq '1')
+        $isBoundary = $isKey -or ($null -eq $currentGop)
+
+        if ($isBoundary) {
+            if ($null -ne $currentGop) {
+                $last = $currentGop.frames[-1]
+                $pattern = (($currentGop.frames | ForEach-Object { [string]$_.pict_type }) -join '')
+                $gopDuration = ''
+                if ($currentGop.start_pts_time -ne '' -and $last.pts_time -ne '') {
+                    $lastDuration = 0.0
+                    try { $lastDuration = [double]$last.duration_time } catch { $lastDuration = 0.0 }
+                    $gopDuration = ([double]$last.pts_time + $lastDuration) - [double]$currentGop.start_pts_time
+                }
+                [void]$gopRows.Add([pscustomobject]@{
+                    gop_index = $gopRows.Count
+                    start_frame = $currentGop.start_frame
+                    end_frame = [int]$last.frame_index
+                    frame_count = $currentGop.frames.Count
+                    start_pts_time = $currentGop.start_pts_time
+                    end_pts_time = $last.pts_time
+                    duration_time = $gopDuration
+                    key_frame_interval = $currentGop.frames.Count
+                    pattern = $pattern
+                    i_count = @($currentGop.frames | Where-Object { $_.pict_type -eq 'I' }).Count
+                    p_count = @($currentGop.frames | Where-Object { $_.pict_type -eq 'P' }).Count
+                    b_count = @($currentGop.frames | Where-Object { $_.pict_type -eq 'B' }).Count
+                    other_count = @($currentGop.frames | Where-Object { $_.pict_type -notin @('I','P','B') }).Count
+                })
+            }
+            $currentGop = [pscustomobject]@{
+                start_frame = $fi
+                start_pts_time = $fr.pts_time
+                frames = [System.Collections.ArrayList]::new()
+            }
+        }
+
+        [void]$currentGop.frames.Add($fr)
+    }
+
+    if ($null -ne $currentGop -and $currentGop.frames.Count -gt 0) {
+        $last = $currentGop.frames[-1]
+        $pattern = (($currentGop.frames | ForEach-Object { [string]$_.pict_type }) -join '')
+        $gopDuration = ''
+        if ($currentGop.start_pts_time -ne '' -and $last.pts_time -ne '') {
+            $lastDuration = 0.0
+            try { $lastDuration = [double]$last.duration_time } catch { $lastDuration = 0.0 }
+            $gopDuration = ([double]$last.pts_time + $lastDuration) - [double]$currentGop.start_pts_time
+        }
+        [void]$gopRows.Add([pscustomobject]@{
+            gop_index = $gopRows.Count
+            start_frame = $currentGop.start_frame
+            end_frame = [int]$last.frame_index
+            frame_count = $currentGop.frames.Count
+            start_pts_time = $currentGop.start_pts_time
+            end_pts_time = $last.pts_time
+            duration_time = $gopDuration
+            key_frame_interval = $currentGop.frames.Count
+            pattern = $pattern
+            i_count = @($currentGop.frames | Where-Object { $_.pict_type -eq 'I' }).Count
+            p_count = @($currentGop.frames | Where-Object { $_.pict_type -eq 'P' }).Count
+            b_count = @($currentGop.frames | Where-Object { $_.pict_type -eq 'B' }).Count
+            other_count = @($currentGop.frames | Where-Object { $_.pict_type -notin @('I','P','B') }).Count
+        })
+    }
+
+    $gopIdx = $gopRows.Count
+    if ($gopIdx -gt 0) {
+        $gopFrameCounts = @($gopRows | ForEach-Object { [int]$_.frame_count })
+        $gopMinFrameCount = ($gopFrameCounts | Measure-Object -Minimum).Minimum
+        $gopMaxFrameCount = ($gopFrameCounts | Measure-Object -Maximum).Maximum
+        $gopAvgFrameCount = [math]::Round(($gopFrameCounts | Measure-Object -Average).Average, 3)
+        $gopKeyIntervals = @($gopRows | ForEach-Object { [int]$_.key_frame_interval })
+        $gopMinKeyInterval = ($gopKeyIntervals | Measure-Object -Minimum).Minimum
+        $gopMaxKeyInterval = ($gopKeyIntervals | Measure-Object -Maximum).Maximum
+        $gopAvgKeyInterval = [math]::Round(($gopKeyIntervals | Measure-Object -Average).Average, 3)
+        $gopTotalI = ($gopRows | ForEach-Object { [int]$_.i_count } | Measure-Object -Sum).Sum
+        $gopTotalP = ($gopRows | ForEach-Object { [int]$_.p_count } | Measure-Object -Sum).Sum
+        $gopTotalB = ($gopRows | ForEach-Object { [int]$_.b_count } | Measure-Object -Sum).Sum
+        $gopTotalOther = ($gopRows | ForEach-Object { [int]$_.other_count } | Measure-Object -Sum).Sum
+        $gopPictTypeSummary = "I=$gopTotalI, P=$gopTotalP, B=$gopTotalB, Other=$gopTotalOther"
+        $gopPatternSamples = @(
+            $gopRows |
+                Select-Object -First 3 |
+                ForEach-Object {
+                    "GOP#$($_.gop_index): frame $($_.start_frame)-$($_.end_frame), $($_.frame_count) frames, pattern=$($_.pattern)"
+                }
+        )
+    }
+    Write-Host "  Analyzed $gopIdx GOP records" -ForegroundColor Green
+
+    # ---- 5. Packet data CSV ----
     $currentStep++
     Write-Host "[$currentStep/$totalSteps] Exporting packet data..." -ForegroundColor Yellow
-    $packetCsv = Join-Path $outDir "$videoName`_packets_$ts.csv"
+    $packetCsv = Join-Path $outDir "packets_$ts.csv"
 
     $packetHeader = 'packet_index,stream_index,pts,pts_time,dts,dts_time,duration,duration_time,size,pos,flags'
     $sw2 = [System.IO.StreamWriter]::new($packetCsv, $false, [System.Text.UTF8Encoding]::new($true))
@@ -127,7 +247,7 @@ if ($meta -and $vStream -and $vStream.r_frame_rate) {
 
 $currentStep++
 Write-Host "[$currentStep/$totalSteps] Extracting frame SHA256 hashes..." -ForegroundColor Yellow
-$frameHashCsv = Join-Path $outDir "$videoName`_framehash_$ts.csv"
+$frameHashCsv = Join-Path $outDir "framehash_$ts.csv"
 
 $swHash = [System.IO.StreamWriter]::new($frameHashCsv, $false, [System.Text.UTF8Encoding]::new($true))
 $swHash.WriteLine('frame_index,dts,pts,pts_time,decoded_size,sha256')
@@ -162,55 +282,108 @@ if ($StartTime -ge 0) {
         New-Item -ItemType Directory -Path $frameOutDir -Force | Out-Null
     }
 
-    # Step 6a: Extract frames to temp files
-    $tempPattern = Join-Path $frameOutDir 'temp_%06d.png'
-    & ffmpeg -nostdin -hide_banner -loglevel error -ss $StartTime -t $Duration -i $VideoPath -vsync 0 "$tempPattern" 2>&1
-
-    # Step 6b: Determine starting frame_index for the time range
+    # StartTime is relative to the first decoded video frame. Some files have
+    # non-zero video PTS, so do not use "ffmpeg -ss $StartTime" directly.
+    # Locate the relative time window by first_pts_time + StartTime, then
+    # export by frame index to keep filenames and pictures aligned.
     $startFrameIdx = -1
+    $endFrameIdx = -1
+    $actualStartRel = $null
+    $actualEndRel = $null
+    $firstPtsTimeForExport = $null
+    $epsilon = 0.000001
+
     if ($frameCsv -and (Test-Path $frameCsv)) {
-        # Read from already-generated frame CSV (preferred: includes frame_index)
         $csvData = Import-Csv $frameCsv
         $firstPtsTime = [double]$csvData[0].pts_time
-        $targetPtsTime = $firstPtsTime + $StartTime
-        $firstTarget = $csvData | Where-Object { [double]$_.pts_time -ge ($targetPtsTime - 0.000001) } | Select-Object -First 1
-        if ($firstTarget) { $startFrameIdx = [int]$firstTarget.frame_index }
+        $firstPtsTimeForExport = $firstPtsTime
+        $targetStartPtsTime = $firstPtsTime + $StartTime
+        $targetEndPtsTime = $firstPtsTime + $StartTime + $Duration
+        $targetRows = @($csvData | Where-Object {
+            $pts = [double]$_.pts_time
+            $pts -ge ($targetStartPtsTime - $epsilon) -and $pts -lt ($targetEndPtsTime - $epsilon)
+        })
+        if ($targetRows.Count -gt 0) {
+            $firstTarget = $targetRows | Select-Object -First 1
+            $lastTarget = $targetRows | Select-Object -Last 1
+            $startFrameIdx = [int]$firstTarget.frame_index
+            $endFrameIdx = [int]$lastTarget.frame_index
+            $actualStartRel = [double]$firstTarget.pts_time - $firstPtsTime
+            $actualEndRel = [double]$lastTarget.pts_time - $firstPtsTime
+        }
     }
 
-    if ($startFrameIdx -lt 0) {
-        # Fallback: count frames before start time by scanning ffprobe output
-        $script:beforeCount = 0
+    if ($startFrameIdx -lt 0 -or $endFrameIdx -lt $startFrameIdx) {
+        # Fallback for -SkipMetadata: scan frame PTS and map the requested
+        # relative window to absolute PTS before exporting by frame index.
+        $script:scanIdx = 0
         $script:firstPts = $null
+        $script:startIdx = -1
+        $script:endIdx = -1
+        $script:startRel = $null
+        $script:endRel = $null
         & ffprobe -v quiet -select_streams v:0 -show_frames -show_entries frame=pts_time -of csv=print_section=0 $VideoPath 2>&1 | ForEach-Object {
             $line = $_.Trim()
             if ($line) {
                 $pts = [double]$line
                 if ($null -eq $script:firstPts) { $script:firstPts = $pts }
-                if ($pts -lt ($script:firstPts + $StartTime - 0.000001)) { $script:beforeCount++ }
+                $targetStartPts = $script:firstPts + $StartTime
+                $targetEndPts = $script:firstPts + $StartTime + $Duration
+                if ($pts -ge ($targetStartPts - $epsilon) -and $pts -lt ($targetEndPts - $epsilon)) {
+                    if ($script:startIdx -lt 0) {
+                        $script:startIdx = $script:scanIdx
+                        $script:startRel = $pts - $script:firstPts
+                    }
+                    $script:endIdx = $script:scanIdx
+                    $script:endRel = $pts - $script:firstPts
+                }
+                $script:scanIdx++
             }
         }
-        $startFrameIdx = $script:beforeCount
+        $firstPtsTimeForExport = $script:firstPts
+        $startFrameIdx = $script:startIdx
+        $endFrameIdx = $script:endIdx
+        $actualStartRel = $script:startRel
+        $actualEndRel = $script:endRel
     }
 
-    # Step 6c: Rename temp files to frame_<frame_index>.png
-    $pngCount = 0
-    $tempFiles = @(Get-ChildItem -Path $frameOutDir -Filter 'temp_*.png' | Sort-Object Name)
-    $idx = $startFrameIdx
-    foreach ($tf in $tempFiles) {
-        $newName = "frame_{0:D6}.png" -f $idx
-        Rename-Item -Path $tf.FullName -NewName $newName
-        $idx++
-        $pngCount++
+    if ($startFrameIdx -lt 0 -or $endFrameIdx -lt $startFrameIdx) {
+        Write-Error "No video frames found for relative time range ${StartTime}s-${endTime}s."
+        exit 1
     }
 
-    Write-Host "  Exported $pngCount PNG frames (frame_index ${startFrameIdx}-$($idx - 1), ${StartTime}s-${endTime}s) to $frameOutDir" -ForegroundColor Green
+    Get-ChildItem -LiteralPath $frameOutDir -Filter 'temp_*.png' -ErrorAction SilentlyContinue | Remove-Item -Force
+    Get-ChildItem -LiteralPath $frameOutDir -Filter 'frame_*.png' -ErrorAction SilentlyContinue | Remove-Item -Force
+
+    $selectFilter = "select='between(n,$startFrameIdx,$endFrameIdx)'"
+    $framePattern = Join-Path $frameOutDir 'frame_%06d.png'
+    & ffmpeg -nostdin -y -hide_banner -loglevel error -i $VideoPath -vf $selectFilter -vsync 0 -start_number $startFrameIdx "$framePattern" 2>&1
+
+    $pngCount = @(Get-ChildItem -LiteralPath $frameOutDir -Filter 'frame_*.png').Count
+    $expectedCount = $endFrameIdx - $startFrameIdx + 1
+    if ($pngCount -ne $expectedCount) {
+        Write-Warning "Expected $expectedCount PNG frames, but exported $pngCount."
+    }
+
+    $frameExportFirstPtsTime = $firstPtsTimeForExport
+    $frameExportStartFrameIdx = $startFrameIdx
+    $frameExportEndFrameIdx = $endFrameIdx
+    $frameExportActualStartRel = $actualStartRel
+    $frameExportActualEndRel = $actualEndRel
+
+    $actualRangeText = if ($null -ne $actualStartRel -and $null -ne $actualEndRel) {
+        "rel_pts_time $([math]::Round($actualStartRel, 3))-$([math]::Round($actualEndRel, 3))s"
+    } else {
+        "relative time ${StartTime}s-${endTime}s"
+    }
+    Write-Host "  Exported $pngCount PNG frames (frame_index ${startFrameIdx}-${endFrameIdx}, $actualRangeText) to $frameOutDir" -ForegroundColor Green
 }
 
 # ---- Summary info file (only if not skipping metadata) ----
 if (-not $SkipMetadata) {
     $currentStep++
     Write-Host "[$currentStep/$totalSteps] Generating summary..." -ForegroundColor Yellow
-    $infoFile = Join-Path $outDir "$videoName`_info_$ts.txt"
+    $infoFile = Join-Path $outDir "info_$ts.txt"
 
     # --- helper functions ---
     function fmt-Size($bytes) {
@@ -254,6 +427,33 @@ if (-not $SkipMetadata) {
         return '-'
     }
 
+    function to-DoubleOrNull($value) {
+        if ($null -eq $value) { return $null }
+        $text = [string]$value
+        if ([string]::IsNullOrWhiteSpace($text) -or $text -eq '-') { return $null }
+        try { return [double]$text } catch { return $null }
+    }
+
+    $timebaseFirstPts = $null
+    if ($frameCsv -and (Test-Path $frameCsv)) {
+        $firstFrameForTimebase = Import-Csv -LiteralPath $frameCsv | Select-Object -First 1
+        if ($firstFrameForTimebase) {
+            $timebaseFirstPts = to-DoubleOrNull $firstFrameForTimebase.pts_time
+        }
+    }
+    if ($null -eq $timebaseFirstPts) {
+        $timebaseFirstPts = to-DoubleOrNull (safe-Val $vStream 'start_time')
+    }
+    $timebaseFormatStart = to-DoubleOrNull (safe-Val $fmt 'start_time')
+    $timebaseVideoStreamStart = to-DoubleOrNull (safe-Val $vStream 'start_time')
+    $timebaseAudioStreamStart = to-DoubleOrNull (safe-Val $aStream 'start_time')
+    $timebaseOffset = $null
+    $timebaseMismatch = $false
+    if ($null -ne $timebaseFirstPts -and $null -ne $timebaseFormatStart) {
+        $timebaseOffset = $timebaseFirstPts - $timebaseFormatStart
+        $timebaseMismatch = [math]::Abs($timebaseOffset) -gt 0.5
+    }
+
     # --- build output lines ---
     $infoLines = [System.Collections.ArrayList]::new()
 
@@ -290,6 +490,43 @@ if (-not $SkipMetadata) {
         if ($fmt.tags.compatible_brands) { [void]$infoLines.Add("    Compatible Brands: $($fmt.tags.compatible_brands)") }
         if ($fmt.tags.encoder)           { [void]$infoLines.Add("    编码器:           $($fmt.tags.encoder)") }
         if ($fmt.tags.creation_time)     { [void]$infoLines.Add("    创建时间:         $($fmt.tags.creation_time)") }
+    }
+    [void]$infoLines.Add('')
+
+    # -- 时间基准说明 --
+    [void]$infoLines.Add('[时间基准说明]')
+    if ($null -ne $timebaseFirstPts) {
+        [void]$infoLines.Add("  视频首帧 PTS:    $('{0:F6}' -f $timebaseFirstPts) 秒")
+    } else {
+        [void]$infoLines.Add('  视频首帧 PTS:    -')
+    }
+    if ($null -ne $timebaseFormatStart) {
+        [void]$infoLines.Add("  容器起始时间:    $('{0:F6}' -f $timebaseFormatStart) 秒")
+    } else {
+        [void]$infoLines.Add('  容器起始时间:    -')
+    }
+    if ($null -ne $timebaseVideoStreamStart) {
+        [void]$infoLines.Add("  视频流起始时间:  $('{0:F6}' -f $timebaseVideoStreamStart) 秒")
+    } else {
+        [void]$infoLines.Add('  视频流起始时间:  -')
+    }
+    if ($null -ne $timebaseAudioStreamStart) {
+        [void]$infoLines.Add("  音频流起始时间:  $('{0:F6}' -f $timebaseAudioStreamStart) 秒")
+    } else {
+        [void]$infoLines.Add('  音频流起始时间:  -')
+    }
+    if ($null -ne $timebaseOffset) {
+        [void]$infoLines.Add("  视频-容器偏移:   $('{0:F6}' -f $timebaseOffset) 秒")
+    } else {
+        [void]$infoLines.Add('  视频-容器偏移:   -')
+    }
+    [void]$infoLines.Add('  分析基准:        后续漂移、时间轴一致性、帧图导出均以视频流首帧为 0 秒。')
+    [void]$infoLines.Add('  换算公式:        video_rel = pts_time - first_pts_time')
+    if ($timebaseMismatch) {
+        [void]$infoLines.Add('  注意:            容器/音频起始时间与视频首帧不一致；播放器显示时间可能与视频首帧相对时间相差上述偏移量。')
+        [void]$infoLines.Add('                  容器相对时间仅用于说明差异，不能替代视频流首帧基准。')
+    } else {
+        [void]$infoLines.Add('  注意:            未见明显容器起始时间与视频首帧起始时间偏移。')
     }
     [void]$infoLines.Add('')
 
@@ -396,15 +633,39 @@ if (-not $SkipMetadata) {
 
     # -- 帧数据 --
     [void]$infoLines.Add('[帧数据]')
-    [void]$infoLines.Add("  输出文件:        $videoName`_frames_$ts.csv")
+    [void]$infoLines.Add("  输出文件:        frames_$ts.csv")
     [void]$infoLines.Add('  字段:            frame_index, key_frame, pts_time, duration_time,')
     [void]$infoLines.Add('                  pkt_pos, pkt_size, pict_type, interlaced_frame')
     [void]$infoLines.Add("  总帧数:          $frameIdx")
     [void]$infoLines.Add('')
 
+    # -- GOP 数据 --
+    [void]$infoLines.Add('[GOP 数据]')
+    [void]$infoLines.Add('  输出方式:        不单独生成 GOP 表格；仅在本 TXT 中记录 GOP 结构摘要。')
+    [void]$infoLines.Add("  GOP 数量:        $gopIdx")
+    if ($null -ne $gopMinFrameCount -and $null -ne $gopMaxFrameCount) {
+        [void]$infoLines.Add("  GOP 帧数范围:    $gopMinFrameCount - $gopMaxFrameCount 帧")
+        [void]$infoLines.Add("  GOP 平均帧数:    $gopAvgFrameCount 帧")
+    }
+    if ($null -ne $gopMinKeyInterval -and $null -ne $gopMaxKeyInterval) {
+        [void]$infoLines.Add("  关键帧间隔范围:  $gopMinKeyInterval - $gopMaxKeyInterval 帧")
+        [void]$infoLines.Add("  平均关键帧间隔:  $gopAvgKeyInterval 帧")
+    }
+    if ($gopPictTypeSummary) {
+        [void]$infoLines.Add("  I/P/B 统计:      $gopPictTypeSummary")
+    }
+    if ($gopPatternSamples.Count -gt 0) {
+        [void]$infoLines.Add('  GOP 结构样例:')
+        foreach ($sample in $gopPatternSamples) {
+            [void]$infoLines.Add("                  $sample")
+        }
+    }
+    [void]$infoLines.Add('  说明:            GOP 由关键帧 key_frame=1 划分；首段从视频首帧开始。')
+    [void]$infoLines.Add('')
+
     # -- 包数据 --
     [void]$infoLines.Add('[包数据]')
-    [void]$infoLines.Add("  输出文件:        $videoName`_packets_$ts.csv")
+    [void]$infoLines.Add("  输出文件:        packets_$ts.csv")
     [void]$infoLines.Add('  字段:            packet_index, stream_index, pts, pts_time, dts,')
     [void]$infoLines.Add('                  dts_time, duration, duration_time, size, pos, flags')
     [void]$infoLines.Add("  总包数:          $packetIdx")
@@ -412,7 +673,7 @@ if (-not $SkipMetadata) {
 
     # -- 帧哈希 --
     [void]$infoLines.Add('[帧哈希]')
-    [void]$infoLines.Add("  输出文件:        $videoName`_framehash_$ts.csv")
+    [void]$infoLines.Add("  输出文件:        framehash_$ts.csv")
     [void]$infoLines.Add('  字段:            frame_index, dts, pts, pts_time, decoded_size, sha256')
     [void]$infoLines.Add("  总帧数:          $hashIdx")
     [void]$infoLines.Add('')
@@ -421,6 +682,14 @@ if (-not $SkipMetadata) {
     if ($StartTime -ge 0) {
         [void]$infoLines.Add('[帧画面]')
         [void]$infoLines.Add("  时间区间:        ${StartTime}s - ${endTime}s (持续 $Duration 秒)")
+        if ($null -ne $frameExportFirstPtsTime) {
+            [void]$infoLines.Add("  首帧 PTS:        $('{0:F6}' -f $frameExportFirstPtsTime) 秒")
+            [void]$infoLines.Add("  PTS 换算:        target_pts_time = first_pts_time + relative_time")
+            [void]$infoLines.Add("  帧号区间:        $frameExportStartFrameIdx - $frameExportEndFrameIdx")
+        }
+        if ($null -ne $frameExportActualStartRel -and $null -ne $frameExportActualEndRel) {
+            [void]$infoLines.Add("  实际相对时间:    $('{0:F3}' -f $frameExportActualStartRel) 秒 - $('{0:F3}' -f $frameExportActualEndRel) 秒")
+        }
         [void]$infoLines.Add("  输出目录:        $frameOutDir")
         [void]$infoLines.Add('  格式:            PNG')
         [void]$infoLines.Add("  总帧数:          $pngCount")

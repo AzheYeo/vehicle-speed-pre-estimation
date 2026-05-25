@@ -82,7 +82,9 @@ def find_frame_csv(output_dir: Path, video: Path | None, explicit: Path | None) 
     if explicit:
         return explicit.resolve()
     candidates: list[Path] = []
+    candidates.extend(sorted(output_dir.glob("frames_*.csv"), reverse=True))
     if video:
+        candidates.extend(sorted(video.resolve().parent.glob(f"{video.stem}_video_metadata_*\\frames_*.csv"), reverse=True))
         candidates.extend(sorted(output_dir.glob(f"{video.stem}_frames_*.csv"), reverse=True))
         candidates.extend(sorted(video.resolve().parent.glob(f"{video.stem}_frames_*.csv"), reverse=True))
         candidates.extend(sorted(video.resolve().parent.glob(f"{video.stem}_video_metadata_*\\{video.stem}_frames_*.csv"), reverse=True))

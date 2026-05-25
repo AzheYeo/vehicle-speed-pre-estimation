@@ -8,7 +8,7 @@ Inputs:
 
 Outputs:
 - per-frame tracking CSV;
-- contact sheet for visual review;
+- representative/problem-frame speed-vector review image;
 - four-part Chinese analysis note.
 """
 
@@ -258,17 +258,140 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
-def draw_sheet(path: Path, images: dict[int, np.ndarray], rows: list[dict], crop_box: tuple[int, int, int, int] | None) -> None:
+def select_visual_rows(rows: list[dict]) -> list[dict]:
+    """Pick representative frames plus problem frames for human review."""
+    if not rows:
+        return []
+    by_idx = {int(r["frame_index"]): r for r in rows}
+    frame_indices = sorted(by_idx)
+    pick_indices: set[int] = set()
+    for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+        pos = round((len(frame_indices) - 1) * fraction)
+        pick_indices.add(frame_indices[pos])
+    anomaly_indices = {int(r["frame_index"]) for r in rows if r.get("anomaly")}
+    for idx in anomaly_indices:
+        pick_indices.add(idx)
+        if idx - 1 in by_idx:
+            pick_indices.add(idx - 1)
+        if idx + 1 in by_idx:
+            pick_indices.add(idx + 1)
+    return [by_idx[i] for i in sorted(pick_indices)]
+
+
+def reference_points(gray: np.ndarray, cx: float, cy: float, base_w: int, base_h: int) -> np.ndarray:
+    h, w = gray.shape[:2]
+    half_w = max(55, int(base_w * 0.42))
+    half_h = max(42, int(base_h * 0.30))
+    x1 = max(0, int(cx - half_w))
+    y1 = max(0, int(cy - half_h))
+    x2 = min(w, int(cx + half_w))
+    y2 = min(h, int(cy + half_h))
+    if x2 <= x1 or y2 <= y1:
+        return np.empty((0, 1, 2), dtype=np.float32)
+    mask = np.zeros_like(gray)
+    cv2.ellipse(mask, (int(cx), int(cy)), (half_w, half_h), 0, 0, 360, 255, -1)
+    pts = cv2.goodFeaturesToTrack(
+        gray,
+        maxCorners=24,
+        qualityLevel=0.02,
+        minDistance=12,
+        blockSize=5,
+        mask=mask,
+    )
+    if pts is None:
+        return np.empty((0, 1, 2), dtype=np.float32)
+    candidates = pts.astype(np.float32)
+    flat = candidates.reshape(-1, 2)
+    order = np.argsort((flat[:, 0] - cx) ** 2 + (flat[:, 1] - cy) ** 2)
+    return candidates[order[:12]].reshape(-1, 1, 2)
+
+
+def tracked_reference_vectors(
+    prev_img: np.ndarray,
+    curr_img: np.ndarray,
+    prev_row: dict,
+    base_w: int,
+    base_h: int,
+) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    prev_gray = cv2.cvtColor(prev_img, cv2.COLOR_BGR2GRAY)
+    curr_gray = cv2.cvtColor(curr_img, cv2.COLOR_BGR2GRAY)
+    prev_cx, prev_cy = float(prev_row["cx"]), float(prev_row["cy"])
+    pts = reference_points(prev_gray, prev_cx, prev_cy, base_w, base_h)
+    if len(pts) == 0:
+        return []
+    dst, status, _ = cv2.calcOpticalFlowPyrLK(
+        prev_gray,
+        curr_gray,
+        pts,
+        None,
+        winSize=(25, 25),
+        maxLevel=3,
+        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+    )
+    if dst is None or status is None:
+        return []
+    src_good = pts[status.ravel() == 1].reshape(-1, 2)
+    dst_good = dst[status.ravel() == 1].reshape(-1, 2)
+    if len(dst_good) == 0:
+        return []
+    flow = dst_good - src_good
+    med = np.median(flow, axis=0)
+    residual = np.linalg.norm(flow - med, axis=1)
+    keep = residual <= max(3.0, np.percentile(residual, 70))
+    src_good = src_good[keep]
+    dst_good = dst_good[keep]
+    if len(dst_good) == 0:
+        return []
+    order = np.argsort(np.linalg.norm(src_good - np.array([prev_cx, prev_cy], dtype=np.float32), axis=1))
+    vectors = []
+    for i in order[:8]:
+        start = (int(round(src_good[i][0])), int(round(src_good[i][1])))
+        end = (int(round(dst_good[i][0])), int(round(dst_good[i][1])))
+        vectors.append((start, end))
+    return vectors
+
+
+def draw_sheet(
+    path: Path,
+    images: dict[int, np.ndarray],
+    rows: list[dict],
+    crop_box: tuple[int, int, int, int] | None,
+    anchor_box: tuple[int, int, int, int],
+) -> None:
     tiles = []
-    for r in rows:
+    selected_rows = select_visual_rows(rows)
+    row_by_idx = {int(r["frame_index"]): r for r in rows}
+    base_w = anchor_box[2] - anchor_box[0]
+    base_h = anchor_box[3] - anchor_box[1]
+    anomaly_indices = {int(r["frame_index"]) for r in rows if r.get("anomaly")}
+
+    for r in selected_rows:
         idx = int(r["frame_index"])
-        if idx % 5 != 0 and idx not in {int(rows[0]["frame_index"]), int(rows[-1]["frame_index"])}:
-            continue
         img = images[idx].copy()
         cx, cy = float(r["cx"]), float(r["cy"])
-        cv2.circle(img, (round(cx), round(cy)), 6, (0, 0, 255), -1)
-        cv2.rectangle(img, (round(cx - 80), round(cy - 45)), (round(cx + 80), round(cy + 45)), (0, 0, 255), 2)
-        cv2.putText(img, str(idx), (round(cx - 75), round(cy - 52)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        color = (0, 0, 255) if idx in anomaly_indices else (0, 200, 255)
+        roi_w = max(80, int(base_w * 0.55))
+        roi_h = max(55, int(base_h * 0.35))
+        cv2.rectangle(img, (round(cx - roi_w), round(cy - roi_h)), (round(cx + roi_w), round(cy + roi_h)), color, 2)
+
+        if r["dx"] != "" and r["dy"] != "":
+            prev = (round(cx - float(r["dx"])), round(cy - float(r["dy"])))
+            curr = (round(cx), round(cy))
+            cv2.arrowedLine(img, prev, curr, (0, 0, 255), 4, tipLength=0.35)
+            cv2.putText(img, "V", (curr[0] + 8, curr[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+        cv2.circle(img, (round(cx), round(cy)), 7, (0, 0, 255), -1)
+        cv2.putText(img, "C", (round(cx) + 8, round(cy) + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+        prev_idx = idx - 1
+        if prev_idx in images and prev_idx in row_by_idx:
+            vectors = tracked_reference_vectors(images[prev_idx], images[idx], row_by_idx[prev_idx], base_w, base_h)
+            for n, (start, end) in enumerate(vectors, start=1):
+                cv2.arrowedLine(img, start, end, (255, 0, 255), 2, tipLength=0.45)
+                cv2.circle(img, start, 3, (255, 0, 255), -1)
+                cv2.circle(img, end, 4, (255, 0, 255), -1)
+                cv2.putText(img, f"T{n}", (end[0] + 5, end[1] - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 255), 1)
+
         if crop_box:
             x1, y1, x2, y2 = crop_box
             tile = img[y1:y2, x1:x2]
@@ -279,7 +402,16 @@ def draw_sheet(path: Path, images: dict[int, np.ndarray], rows: list[dict], crop
             tile = img[y1:y2, x1:x2]
         if tile.size == 0:
             continue
-        tile = cv2.resize(tile, (696, 190), interpolation=cv2.INTER_AREA)
+        rel_text = f"frame {idx}  rel={float(r['rel_pts_time']):.2f}s"
+        speed_text = "speed=N/A" if r["pixel_speed"] == "" else f"speed={float(r['pixel_speed']):.1f}px/s"
+        cv2.rectangle(tile, (8, 8), (390, 84 if idx not in anomaly_indices else 116), (0, 0, 0), -1)
+        cv2.putText(tile, rel_text, (18, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 255), 2)
+        cv2.putText(tile, speed_text, (18, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 255), 2)
+        if idx in anomaly_indices:
+            cv2.putText(tile, f"CHECK: {r['anomaly']}", (18, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        cv2.rectangle(tile, (8, tile.shape[0] - 43), (520, tile.shape[0] - 8), (0, 0, 0), -1)
+        cv2.putText(tile, "C=center vector  T=tracked point vector, previous frame to current frame", (18, tile.shape[0] - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        tile = cv2.resize(tile, (760, 430), interpolation=cv2.INTER_AREA)
         tiles.append(tile)
     if not tiles:
         return
@@ -402,7 +534,7 @@ def main() -> int:
     parser.add_argument("--stable-end-frame", type=int, default=None, help="Optional last reliable frame for formal report.")
     parser.add_argument("--first-pts-time", type=float, default=None, help="Override first PTS time; defaults to first row in frames CSV.")
     parser.add_argument("--output-dir", type=Path, default=None, help="Output directory.")
-    parser.add_argument("--crop", type=parse_box, default=None, help="Optional contact-sheet crop x1,y1,x2,y2.")
+    parser.add_argument("--crop", type=parse_box, default=None, help="Optional vector-review crop x1,y1,x2,y2.")
     parser.add_argument("--unstable-note", default="若目标车辆在部分时段被遮挡、与其它车辆重叠或跟踪点漂移，应由用户另行标注该时段目标位置后再分析。")
     args = parser.parse_args()
 
@@ -438,7 +570,7 @@ def main() -> int:
     write_csv(report_csv, report_rows)
 
     sheet_path = output_dir / "marked_vehicle_tracking_sheet.png"
-    draw_sheet(sheet_path, images, report_rows, args.crop)
+    draw_sheet(sheet_path, images, report_rows, args.crop, args.box)
 
     report_path = output_dir / "marked_vehicle_four_part_analysis.txt"
     write_report(report_path, report_rows, first_pts, args.anchor_frame, args.box, args.unstable_note)
