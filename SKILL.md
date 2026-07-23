@@ -9,7 +9,7 @@ description: 提取视频元数据和指定区间帧图片，并从PTS时间轴�
 
 按顺序执行：
 
-1. 用 `extract.ps1 -Simplified` 提取 `info.txt` 和指定区间全部原始帧。
+1. 直接从原视频提取元数据、`info.txt` 和指定区间全部原始帧，不转码、不补帧、不改变帧率。
 2. 分别完成三个独立维度：
    - 维度一：PTS编码时间轴；
    - 维度二：指定车辆逐相邻帧运动连续性；
@@ -21,14 +21,7 @@ description: 提取视频元数据和指定区间帧图片，并从PTS时间轴�
 
 ## 第一步：提取
 
-```powershell
-$skillDir = "<本技能目录的绝对路径>"
-& (Join-Path $skillDir "extract.ps1") `
-  -VideoPath "<视频绝对路径>" `
-  -StartTime 340 `
-  -Duration 7 `
-  -Simplified
-```
+使用 FFprobe/FFmpeg 或等效工具直接读取原文件。提取程序可以由执行环境提供，但不得把转码后的视频作为检验对象。
 
 时间统一使用：
 
