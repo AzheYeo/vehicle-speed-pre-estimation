@@ -1,4 +1,4 @@
 interface:
-  display_name: "视频可测速性判定"
-  short_description: "核验视频时间轴、OSD与运动连续性并生成HTML报告"
-  default_prompt: "Use $video-metadata to evaluate whether this fixed-camera OSD video has reliable timing for later speed measurement and deliver a self-contained Chinese HTML report."
+  display_name: "视频测速预检与运动连续性验证"
+  short_description: "逐车覆盖待检区间，定位运动不连续帧并复核时间采样"
+  default_prompt: "Use $video-metadata to extract the selected video interval, verify PTS and OSD independently, and perform minimum-vehicle full-coverage adjacent-frame motion continuity analysis with labeled anomaly arrival frames."
