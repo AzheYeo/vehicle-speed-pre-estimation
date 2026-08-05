@@ -10,7 +10,7 @@
 
 ## 共同数据要求
 
-- 目标车辆或路面参照物必须由用户标注、提供 ROI 坐标，或由任务语义明确限定；不要自行替换目标。
+- 用户已指定车辆或路面参照物时，必须使用其标注、ROI或任务语义限定的目标，不得自行替换。用户未指定目标时，按 `motion_continuity_sop.md` 的最少车辆完整覆盖规则选择并记录候选目标。
 - ROI 坐标使用原始视频帧坐标。标注图尺寸不同于原始帧时，先按比例换算并写明换算过程。
 - 统一使用 `rel_pts_time = pts_time - first_pts_time`。
 - 相邻帧时间差使用 `delta_pts_time = rel_pts_time_i - rel_pts_time_{i-1}`；不要用固定帧率替代真实逐帧 PTS 差分，除非报告明确说明该固定值来自逐帧核验。
@@ -55,7 +55,7 @@
 
 ## intra 宏块占比
 
-`analyze_frame_interval.py` 可通过 FFmpeg `-debug mb_type` 输出 H.264 宏块类型统计。`intra_pct` 表示对应帧的全帧 intra 宏块占比。
+如执行环境能够通过 FFmpeg `-debug mb_type` 或等效方法统计，`intra_pct` 表示对应帧的全帧 intra 宏块占比。
 
 - `intra_pct` 只能作为辅助指标，不能单独证明视频剪辑或时间轴错误。
 - 除非另行裁剪视频或扩展脚本按 ROI 宏块范围统计，不得把全帧 `intra_pct` 表述为 ROI 内 intra 宏块占比。
