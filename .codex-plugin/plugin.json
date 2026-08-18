@@ -1,13 +1,13 @@
 {
-  "name": "vehicle-speed-pre-estimation",
+  "name": "vehicle-video-analysis",
   "version": "0.1.0",
   "description": "Extract auditable video frames and review adjacent-frame motion continuity without estimating physical speed.",
   "author": {
     "name": "AzheYeo",
     "url": "https://github.com/AzheYeo"
   },
-  "homepage": "https://github.com/AzheYeo/vehicle-speed-pre-estimation",
-  "repository": "https://github.com/AzheYeo/vehicle-speed-pre-estimation",
+  "homepage": "https://github.com/AzheYeo/vehicle-video-analysis",
+  "repository": "https://github.com/AzheYeo/vehicle-video-analysis",
   "keywords": [
     "video-analysis",
     "frame-extraction",
