@@ -1,0 +1,4 @@
+interface:
+  display_name: "视频帧与基础数据提取"
+  short_description: "按播放器时间导出指定区间帧图、视频信息和单一逐帧CSV"
+  default_prompt: "使用 $video-frame-extraction 按我提供的视频地址和播放器时间区间提取帧图片、info信息及逐帧CSV。"
