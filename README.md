@@ -1,6 +1,6 @@
 # Vehicle Video Analysis
 
-一个面向车辆视频前置审查的纯 Skills Plugin，分离直接提取的数据与后续运动连续性推断。
+一个面向车辆视频前置审查的 Codex 多 Skill 仓库，分离直接提取的数据与后续运动连续性推断。
 
 ## 包含的 Skills
 
@@ -9,10 +9,24 @@
 
 两个 Skill 均不计算实际物理车速，也不凭单项指标认定法律意义上的删帧或具体处理软件。
 
-## 插件结构
+## 仓库结构
 
-插件入口为 `.codex-plugin/plugin.json`，Skills 位于 `skills/`。每个 Skill 独立保存其说明、UI元数据和按需加载的参考文件。
+Skills 位于 `.agents/skills/`，Codex 在仓库中工作时可直接发现。每个 Skill 独立保存其说明、UI 元数据和按需加载的参考文件：
+
+```text
+.agents/skills/
+├─ video-frame-extraction/
+│  ├─ SKILL.md
+│  ├─ agents/openai.yaml
+│  └─ references/
+└─ video-motion-continuity/
+   ├─ SKILL.md
+   ├─ agents/openai.yaml
+   └─ references/
+```
+
+如需全局使用，可从本 GitHub 仓库分别安装两个 Skill。
 
 ## 开发验证
 
-修改后应分别校验两个 Skill，再校验插件 manifest。代表性触发请求与边界用例保存在 `evals/`。
+修改后应分别校验两个 Skill。代表性触发请求与边界用例保存在 `evals/`。
