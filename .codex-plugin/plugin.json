@@ -1,0 +1,32 @@
+{
+  "name": "vehicle-speed-pre-estimation",
+  "version": "0.1.0",
+  "description": "Extract auditable video frames and review adjacent-frame motion continuity without estimating physical speed.",
+  "author": {
+    "name": "AzheYeo",
+    "url": "https://github.com/AzheYeo"
+  },
+  "homepage": "https://github.com/AzheYeo/vehicle-speed-pre-estimation",
+  "repository": "https://github.com/AzheYeo/vehicle-speed-pre-estimation",
+  "keywords": [
+    "video-analysis",
+    "frame-extraction",
+    "motion-continuity",
+    "vehicle-forensics"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Vehicle Video Analysis",
+    "shortDescription": "Extract frames and review motion continuity",
+    "longDescription": "Extract traceable frame-level timing data from videos, then review strict adjacent-frame motion continuity in a separate analysis stage. The plugin does not estimate physical vehicle speed.",
+    "developerName": "AzheYeo",
+    "category": "Productivity",
+    "capabilities": [
+      "Write"
+    ],
+    "defaultPrompt": [
+      "提取这个视频指定播放器时间区间的帧图片和逐帧CSV。",
+      "复核这个视频指定区间的相邻帧运动连续性。"
+    ]
+  }
+}
