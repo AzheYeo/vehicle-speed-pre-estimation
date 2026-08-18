@@ -1,0 +1,4 @@
+interface:
+  display_name: "视频运动连续性复核"
+  short_description: "复核视频运动连续性、标记疑似跳帧并修正OSD秒间帧序号"
+  default_prompt: "使用 $video-motion-continuity 复核我指出区间的运动连续性，标记异常帧并生成修正后的逐帧CSV。"

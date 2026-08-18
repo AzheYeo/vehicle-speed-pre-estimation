@@ -1,4 +1,0 @@
-interface:
-  display_name: "视频测速前置审查"
-  short_description: "复核视频时间轴、OSD、内容更新与车辆运动连续性并生成报告"
-  default_prompt: "使用 $vehicle-speed-precheck 审查该视频是否具备后续测速所需的可靠时间条件，并生成可追溯的中文报告。"
