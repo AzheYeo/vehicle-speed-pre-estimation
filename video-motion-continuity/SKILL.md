@@ -25,7 +25,7 @@ description: 复核视频运动连续性、疑似跳帧或运动异常。读取�
 
 ## 分析流程
 
-完整读取 `references/motion-analysis.md` 和 `references/analysis-data-contract.md`。
+完整读取 `references/motion-analysis.md` 和 `references/analysis-data-contract.md`。实施自动车辆检测、跟踪或配置运行环境时，再读取 `references/technology-stack.md`。
 
 1. 验证基础CSV、帧序号和帧图一一对应。
 2. 把指定区间展开为全部严格相邻帧对。

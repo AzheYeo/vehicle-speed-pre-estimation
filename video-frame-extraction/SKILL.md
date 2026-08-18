@@ -50,7 +50,7 @@ info_<播放器起始时间>-<播放器结束时间>.txt
 
 时间统一使用连续数字格式，例如整秒区间 `000120-000125`，带毫秒区间 `000120000-000125000`。不要把任务时间区间重复写进info正文。
 
-完整读取 `references/output-schema.md`，按其中顺序生成info和CSV。只生成一张CSV，不再拆分元数据表、OSD表、帧型表或其他统计表。
+完整读取 `references/output-schema.md`，按其中顺序生成info和CSV。实施自动OSD识别或配置运行环境时，再读取 `references/technology-stack.md`。只生成一张CSV，不再拆分元数据表、OSD表、帧型表或其他统计表。
 
 第一阶段CSV预留第二阶段字段：
 
